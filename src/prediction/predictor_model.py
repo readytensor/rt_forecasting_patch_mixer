@@ -195,19 +195,6 @@ class Forecaster:
         else:
             self.n_extra_channels += 1
 
-        self.model = PatchMixer(
-            input_chunk_length=self.input_chunk_length,
-            output_chunk_length=self.output_chunk_length,
-            n_input_channels=self.n_input_channels,
-            n_extra_channels=self.n_extra_channels,
-            add_relative_index=self.add_relative_index,
-            use_static_covariates=self.use_static_covariates,
-            optimizer_kwargs=self.optimizer_kwargs,
-            pl_trainer_kwargs=self.pl_trainer_kwargs,
-            random_state=self.random_state,
-            **kwargs,
-        )
-
     def _prepare_data(
         self,
         history: pd.DataFrame,
