@@ -15,6 +15,7 @@ from prediction.model import PatchMixer
 from logger import get_logger
 
 warnings.filterwarnings("ignore")
+
 logger = get_logger(task_name="model")
 
 PREDICTOR_FILE_NAME = "predictor.joblib"
@@ -183,9 +184,9 @@ class Forecaster:
 
         if cuda.is_available():
             self.pl_trainer_kwargs["accelerator"] = "gpu"
-            logger.info("GPU training is available.")
+            print("GPU training is available.")
         else:
-            logger.info("GPU training not available.")
+            print("GPU training not available.")
 
         self.n_input_channels = len(self.data_schema.past_covariates) + 1
         self.n_extra_channels = len(self.data_schema.future_covariates)
@@ -193,6 +194,19 @@ class Forecaster:
             self.n_extra_channels += 3
         else:
             self.n_extra_channels += 1
+
+        self.model = PatchMixer(
+            input_chunk_length=self.input_chunk_length,
+            output_chunk_length=self.output_chunk_length,
+            n_input_channels=self.n_input_channels,
+            n_extra_channels=self.n_extra_channels,
+            add_relative_index=self.add_relative_index,
+            use_static_covariates=self.use_static_covariates,
+            optimizer_kwargs=self.optimizer_kwargs,
+            pl_trainer_kwargs=self.pl_trainer_kwargs,
+            random_state=self.random_state,
+            **kwargs,
+        )
 
     def _prepare_data(
         self,
@@ -206,7 +220,6 @@ class Forecaster:
         Args:
             history (pd.DataFrame): The provided training data.
             data_schema (ForecastingSchema): The schema of the training data.
-
 
         Returns:
             Tuple[List, List, List]: Target, Past covariates and Future covariates.
@@ -251,7 +264,7 @@ class Forecaster:
 
             scalers[index] = scaler
             static_covariates = None
-            if self.use_exogenous and self.data_schema.static_covariates:
+            if self.use_static_covariates and self.data_schema.static_covariates:
                 static_covariates = s[self.data_schema.static_covariates]
 
             target = TimeSeries.from_dataframe(
@@ -264,17 +277,18 @@ class Forecaster:
 
             targets.append(target)
 
-            past_static_covariates = (
-                data_schema.past_covariates + data_schema.static_covariates
-            )
-            if past_static_covariates:
+            if data_schema.past_covariates:
                 original_values = (
-                    s[past_static_covariates].values.reshape(-1, 1)
-                    if len(past_static_covariates) == 1
-                    else s[past_static_covariates].values
+                    s[data_schema.past_covariates].values.reshape(-1, 1)
+                    if len(data_schema.past_covariates) == 1
+                    else s[data_schema.past_covariates].values
                 )
-                s[past_static_covariates] = past_scaler.fit_transform(original_values)
-                past_covariates = TimeSeries.from_dataframe(s[past_static_covariates])
+                s[data_schema.past_covariates] = past_scaler.fit_transform(
+                    original_values
+                )
+                past_covariates = TimeSeries.from_dataframe(
+                    s[data_schema.past_covariates]
+                )
                 past.append(past_covariates)
 
         future_scalers = {}
@@ -304,9 +318,9 @@ class Forecaster:
 
         self.scalers = scalers
         self.future_scalers = future_scalers
-        if not past or not self.use_exogenous:
+        if not past or not self.use_past_covariates:
             past = None
-        if not future or not self.use_exogenous:
+        if not future or not self.use_future_covariates:
             future = None
 
         return targets, past, future
@@ -366,7 +380,7 @@ class Forecaster:
                 )
                 future.append(future_covariates)
 
-        if not future or not self.use_exogenous:
+        if not future or not self.use_future_covariates:
             future = None
         else:
             for index, (train_covariates, test_covariates) in enumerate(
@@ -416,6 +430,8 @@ class Forecaster:
         self,
         history: pd.DataFrame,
         data_schema: ForecastingSchema,
+        history_length: int = None,
+        test_dataframe: pd.DataFrame = None,
     ) -> None:
         """Fit the Forecaster to the training data.
         A separate PatchMixerr model is fit to each series that is contained
@@ -424,6 +440,8 @@ class Forecaster:
         Args:
             history (pandas.DataFrame): The features of the training data.
             data_schema (ForecastingSchema): The schema of the training data.
+            history_length (int): The length of the series used for training.
+            test_dataframe (pd.DataFrame): The testing data (needed only if the data contains future covariates).
         """
         np.random.seed(self.random_state)
         targets, past_covariates, future_covariates = self._prepare_data(
@@ -528,6 +546,7 @@ def train_predictor_model(
     history: pd.DataFrame,
     data_schema: ForecastingSchema,
     hyperparameters: dict,
+    testing_dataframe: pd.DataFrame = None,
 ) -> Forecaster:
     """
     Instantiate and train the predictor model.
@@ -536,6 +555,7 @@ def train_predictor_model(
         history (pd.DataFrame): The training data inputs.
         data_schema (ForecastingSchema): Schema of the training data.
         hyperparameters (dict): Hyperparameters for the Forecaster.
+        test_dataframe (pd.DataFrame): The testing data (needed only if the data contains future covariates).
 
     Returns:
         'Forecaster': The Forecaster model
@@ -548,6 +568,8 @@ def train_predictor_model(
     model.fit(
         history=history,
         data_schema=data_schema,
+        history_length=model.history_length,
+        test_dataframe=testing_dataframe,
     )
     return model
 
