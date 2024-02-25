@@ -26,8 +26,6 @@ MixedCovariatesTrainTensorType = Tuple[
 ]
 from torch import Tensor
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-
 
 class RevIN(nn.Module):
     def __init__(self, num_features: int, eps=1e-5, affine=True, subtract_last=False):
@@ -48,7 +46,6 @@ class RevIN(nn.Module):
             self._init_params()
 
     def forward(self, x, mode: str):
-        x = x.to(device)
         if mode == "norm":
             self._get_statistics(x)
             x = self._normalize(x)
@@ -114,7 +111,6 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
-        x = x.to(device)
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -171,7 +167,6 @@ class Backbone(nn.Module):
         self.mlp = Mlp(patch_len * patch_num, pred_len * 2, pred_len)
 
     def forward(self, x):  # B, L, D -> B, H, D
-        x = x.to(device)
         B, _, D = x.shape
         L = self.patch_num
         P = self.patch_len
@@ -374,9 +369,6 @@ class _PatchMixer(PLMixedCovariatesModule):
             the output tensor
         """
         x_cont_past, x_cont_future, x_static = x_in
-        x_cont_past = x_cont_past.to(device)
-        x_cont_future = x_cont_future.to(device)
-        x_static = x_static.to(device)
         dim_samples, dim_time, dim_variable = 0, 1, 2
         device = x_in[0].device
 
