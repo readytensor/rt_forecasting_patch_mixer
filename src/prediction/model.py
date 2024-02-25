@@ -19,11 +19,14 @@ from darts.utils.data import (
     MixedCovariatesTrainingDataset,
     TrainingDataset,
 )
+
 logger = get_logger(__name__)
 MixedCovariatesTrainTensorType = Tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]
 from torch import Tensor
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 class RevIN(nn.Module):
@@ -44,11 +47,12 @@ class RevIN(nn.Module):
         if self.affine:
             self._init_params()
 
-    def forward(self, x, mode:str):
-        if mode == 'norm':
+    def forward(self, x, mode: str):
+        x = x.to(device)
+        if mode == "norm":
             self._get_statistics(x)
             x = self._normalize(x)
-        elif mode == 'denorm':
+        elif mode == "denorm":
             x = self._denormalize(x)
         else:
             raise NotImplementedError
@@ -60,12 +64,14 @@ class RevIN(nn.Module):
         self.affine_bias = nn.Parameter(torch.zeros(self.num_features))
 
     def _get_statistics(self, x):
-        dim2reduce = tuple(range(1, x.ndim-1))
+        dim2reduce = tuple(range(1, x.ndim - 1))
         if self.subtract_last:
-            self.last = x[:,-1,:].unsqueeze(1)
+            self.last = x[:, -1, :].unsqueeze(1)
         else:
             self.mean = torch.mean(x, dim=dim2reduce, keepdim=True).detach()
-        self.stdev = torch.sqrt(torch.var(x, dim=dim2reduce, keepdim=True, unbiased=False) + self.eps).detach()
+        self.stdev = torch.sqrt(
+            torch.var(x, dim=dim2reduce, keepdim=True, unbiased=False) + self.eps
+        ).detach()
 
     def _normalize(self, x):
         if self.subtract_last:
@@ -81,7 +87,7 @@ class RevIN(nn.Module):
     def _denormalize(self, x):
         if self.affine:
             x = x - self.affine_bias
-            x = x / (self.affine_weight + self.eps*self.eps)
+            x = x / (self.affine_weight + self.eps * self.eps)
         x = x * self.stdev
         if self.subtract_last:
             x = x + self.last
@@ -90,10 +96,15 @@ class RevIN(nn.Module):
         return x
 
 
-
-
 class Mlp(nn.Module):
-    def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
+    def __init__(
+        self,
+        in_features,
+        hidden_features=None,
+        out_features=None,
+        act_layer=nn.GELU,
+        drop=0.0,
+    ):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
@@ -103,6 +114,7 @@ class Mlp(nn.Module):
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
+        x = x.to(device)
         x = self.fc1(x)
         x = self.act(x)
         x = self.drop(x)
@@ -110,8 +122,9 @@ class Mlp(nn.Module):
         x = self.drop(x)
         return x
 
+
 class Backbone(nn.Module):
-    def __init__(self, seq_len, pred_len, patch_len= 16, stride = 8, padding_patch = 'end'):
+    def __init__(self, seq_len, pred_len, patch_len=16, stride=8, padding_patch="end"):
         super(Backbone, self).__init__()
 
         self.seq_len = seq_len
@@ -119,10 +132,10 @@ class Backbone(nn.Module):
 
         # Patching
         self.patch_len = patch_len  # 16
-        self.stride = stride   # 8
+        self.stride = stride  # 8
         self.patch_num = patch_num = int((seq_len - patch_len) / stride + 1)
         self.padding_patch = padding_patch
-        if padding_patch == 'end':  # can be modified to general case
+        if padding_patch == "end":  # can be modified to general case
             self.padding_patch_layer = nn.ReplicationPad1d((0, stride))
             self.patch_num = patch_num = patch_num + 1
 
@@ -137,7 +150,13 @@ class Backbone(nn.Module):
         self.dropout_res = nn.Dropout(0.3)
 
         # 3.1
-        self.depth_conv = nn.Conv1d(patch_num, patch_num, kernel_size=patch_len, stride=patch_len, groups=patch_num)
+        self.depth_conv = nn.Conv1d(
+            patch_num,
+            patch_num,
+            kernel_size=patch_len,
+            stride=patch_len,
+            groups=patch_num,
+        )
         self.depth_activation = nn.GELU()
         self.depth_norm = nn.BatchNorm1d(patch_num)
         self.depth_res = nn.Linear(d_model, patch_len)
@@ -151,7 +170,8 @@ class Backbone(nn.Module):
         # 4
         self.mlp = Mlp(patch_len * patch_num, pred_len * 2, pred_len)
 
-    def forward(self, x): # B, L, D -> B, H, D
+    def forward(self, x):  # B, L, D -> B, H, D
+        x = x.to(device)
         B, _, D = x.shape
         L = self.patch_num
         P = self.patch_len
@@ -160,50 +180,53 @@ class Backbone(nn.Module):
         # z_res = self.dropout_res(z_res)
 
         # 1
-        if self.padding_patch == 'end':
-            z = self.padding_patch_layer(x.permute(0, 2, 1))  # B, L, D -> B, D, L -> B, D, L
-        z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride) # B, D, L, P
+        if self.padding_patch == "end":
+            z = self.padding_patch_layer(
+                x.permute(0, 2, 1)
+            )  # B, L, D -> B, D, L -> B, D, L
+        z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride)  # B, D, L, P
         z = z.reshape(B * D, L, P, 1).squeeze(-1)
-        z = self.embed(z) # B * D, L, P -> # B * D, L, d
+        z = self.embed(z)  # B * D, L, P -> # B * D, L, d
         z = self.dropout_embed(z)
 
         # 2
-        z_res = self.lin_res(z.reshape(B, D, -1)) # B * D, L, d -> B, D, L * d -> B, D, H
+        z_res = self.lin_res(
+            z.reshape(B, D, -1)
+        )  # B * D, L, d -> B, D, L * d -> B, D, H
         z_res = self.dropout_res(z_res)
 
         # 3.1
-        res = self.depth_res(z) # B * D, L, d -> B * D, L, P
-        z_depth = self.depth_conv(z) # B * D, L, d -> B * D, L, P
+        res = self.depth_res(z)  # B * D, L, d -> B * D, L, P
+        z_depth = self.depth_conv(z)  # B * D, L, d -> B * D, L, P
         z_depth = self.depth_activation(z_depth)
         z_depth = self.depth_norm(z_depth)
         z_depth = z_depth + res
         # 3.2
-        z_point = self.point_conv(z_depth) # B * D, L, P -> B * D, L, P
+        z_point = self.point_conv(z_depth)  # B * D, L, P -> B * D, L, P
         z_point = self.point_activation(z_point)
         z_point = self.point_norm(z_point)
-        z_point = z_point.reshape(B, D, -1) # B * D, L, P -> B, D, L * P
+        z_point = z_point.reshape(B, D, -1)  # B * D, L, P -> B, D, L * P
 
         # 4
-        z_mlp = self.mlp(z_point) # B, D, L * P -> B, D, H
+        z_mlp = self.mlp(z_point)  # B, D, L * P -> B, D, H
 
-        return (z_res + z_mlp).permute(0,2,1)
+        return (z_res + z_mlp).permute(0, 2, 1)
 
 
 class _PatchMixer(PLMixedCovariatesModule):
     def __init__(
-            self,
-            n_input_channels: int,
-            n_extra_channels: int,
-            output_dim: Tuple[int, int],
-            variables_meta: Dict[str, Dict[str, List[str]]],
-            num_static_components: int,
-            add_relative_index: bool,
-            patch_len: int = 16,
-            stride: int = 8,
-            padding_patch: str = 'end',
-            **kwargs,
+        self,
+        n_input_channels: int,
+        n_extra_channels: int,
+        output_dim: Tuple[int, int],
+        variables_meta: Dict[str, Dict[str, List[str]]],
+        num_static_components: int,
+        add_relative_index: bool,
+        patch_len: int = 16,
+        stride: int = 8,
+        padding_patch: str = "end",
+        **kwargs,
     ):
-
         """
         A metaclass for all PatchMixer models.
 
@@ -251,12 +274,19 @@ class _PatchMixer(PLMixedCovariatesModule):
         self.static_channel_provided = num_static_components > 0
         self.seq_len = self.input_chunk_length
         self.pred_len = self.output_chunk_length
-        self.fc_out = nn.Linear(self.n_input_channels + n_extra_channels, self.n_targets)
+        self.fc_out = nn.Linear(
+            self.n_input_channels + n_extra_channels, self.n_targets
+        )
         self.batch_size_last = -1
         self.relative_index = None
         self.rev = RevIN(num_features=self.n_targets, subtract_last=True)
-        self.backbone = Backbone(self.seq_len, self.pred_len, patch_len=self.patch_len, stride=self.stride,
-                                 padding_patch=self.padding_patch)
+        self.backbone = Backbone(
+            self.seq_len,
+            self.pred_len,
+            patch_len=self.patch_len,
+            stride=self.stride,
+            padding_patch=self.padding_patch,
+        )
 
     @property
     def reals(self) -> List[str]:
@@ -309,11 +339,11 @@ class _PatchMixer(PLMixedCovariatesModule):
 
     @staticmethod
     def get_relative_index(
-            encoder_length: int,
-            decoder_length: int,
-            batch_size: int,
-            dtype: torch.dtype,
-            device: torch.device,
+        encoder_length: int,
+        decoder_length: int,
+        batch_size: int,
+        dtype: torch.dtype,
+        device: torch.device,
     ) -> torch.Tensor:
         """
         Returns scaled time index relative to prediction point.
@@ -326,12 +356,9 @@ class _PatchMixer(PLMixedCovariatesModule):
         index[encoder_length:] = index[encoder_length:] / prediction_index
         return index.reshape(1, len(index), 1).repeat(batch_size, 1, 1)
 
-
-
-
     @io_processor
     def forward(
-            self, x_in: Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]
+        self, x_in: Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]
     ) -> torch.Tensor:
         """PatchMixer model forward pass.
 
@@ -347,15 +374,15 @@ class _PatchMixer(PLMixedCovariatesModule):
             the output tensor
         """
         x_cont_past, x_cont_future, x_static = x_in
+        x_cont_past = x_cont_past.to(device)
+        x_cont_future = x_cont_future.to(device)
+        x_static = x_static.to(device)
         dim_samples, dim_time, dim_variable = 0, 1, 2
         device = x_in[0].device
 
-
-
-
         x_cont_past_target = x_cont_past[:, :, : self.n_targets]
-        x_cont_past_covariates = x_cont_past[:, :, self.n_targets:]
-        x_cont_past_target = self.rev(x_cont_past_target, mode='norm')
+        x_cont_past_covariates = x_cont_past[:, :, self.n_targets :]
+        x_cont_past_target = self.rev(x_cont_past_target, mode="norm")
         x_cont_past = torch.cat([x_cont_past_target, x_cont_past_covariates], dim=-1)
 
         batch_size = x_cont_past.shape[dim_samples]
@@ -392,66 +419,65 @@ class _PatchMixer(PLMixedCovariatesModule):
             )
         z = self.backbone(x_cont_past)  # B, L, D -> B, H, D
         z = self.fc_out(z)
-        z = self.rev(z, 'denorm')  # B, L, D -> B, H, D
+        z = self.rev(z, "denorm")  # B, L, D -> B, H, D
         return z.unsqueeze(-1)
-
 
 
 class PatchMixer(MixedCovariatesTorchModel):
     def __init__(
-            self,
-            input_chunk_length: int,
-            output_chunk_length: int,
-            n_input_channels: int,
-            n_extra_channels: int,
-            add_relative_index: bool = False,
-            use_static_covariates: bool = True,
-            patch_len: int = 16,
-            stride: int = 8,
-            padding_patch: str = 'end',
-            **kwargs,
+        self,
+        input_chunk_length: int,
+        output_chunk_length: int,
+        n_input_channels: int,
+        n_extra_channels: int,
+        add_relative_index: bool = False,
+        use_static_covariates: bool = True,
+        patch_len: int = 16,
+        stride: int = 8,
+        padding_patch: str = "end",
+        **kwargs,
     ):
         """
 
-        PyTorch implementation of the New PatchMixer model from `this paper <https://arxiv.org/pdf/2303.06053.pdf>`_.
-        The implemntation use Darts Forescasting Module, this class works as a plugin for Darts.
+                PyTorch implementation of the New PatchMixer model from `this paper <https://arxiv.org/pdf/2303.06053.pdf>`_.
+                The implemntation use Darts Forescasting Module, this class works as a plugin for Darts.
 
-        Parameters
-        ----------
-        input_chunk_length
-            length of the input chunk
-        output_chunk_length
-            length of the output chunk
-        n_input_channels
-            number of input channels
-        n_extra_channels
-            number of extra channels
-        hidden_size
-            hidden size of the model
-        num_block
-            number of blocks
-        dropout
-            dropout rate
-        hidden_continuous_size
-            hidden size for continuous variables
-        add_relative_index
-            whether to add relative index
-        norm_type
-            type of normalization
-        use_static_covariates
-            whether to use static covariates
-        kwargs
-            all parameters required for :class:`darts.model.forecasting_models.TorchForecastingModel` base class.
+                Parameters
+                ----------
+                input_chunk_length
+                    length of the input chunk
+                output_chunk_length
+                    length of the output chunk
+                n_input_channels
+                    number of input channels
+                n_extra_channels
+                    number of extra channels
+                hidden_size
+                    hidden size of the model
+                num_block
+                    number of blocks
+                dropout
+                    dropout rate
+                hidden_continuous_size
+                    hidden size for continuous variables
+                add_relative_index
+                    whether to add relative index
+                norm_type
+                    type of normalization
+                use_static_covariates
+                    whether to use static covariates
+                kwargs
+                    all parameters required for :class:`darts.model.forecasting_models.TorchForecastingModel` base class.
 
-n_input_channels: int,
-            n_extra_channels: int,
-            output_dim: Tuple[int, int],
-            variables_meta: Dict[str, Dict[str, List[str]]],
-            num_static_components: int,
-            add_relative_index: bool,
-            patch_len: int = 16,
-            stride: int = 8,
-            padding_patch: str = 'end',
+        n_input_channels: int,
+                    n_extra_channels: int,
+                    output_dim: Tuple[int, int],
+                    variables_meta: Dict[str, Dict[str, List[str]]],
+                    num_static_components: int,
+                    add_relative_index: bool,
+                    patch_len: int = 16,
+                    stride: int = 8,
+                    padding_patch: str = 'end',
 
         """
 
@@ -521,7 +547,7 @@ n_input_channels: int,
             )
             future_covariate = np.concatenate(
                 [
-                    ts[-self.output_chunk_length:]
+                    ts[-self.output_chunk_length :]
                     for ts in [future_covariate, expand_future_covariate]
                     if ts is not None
                 ],
@@ -593,7 +619,7 @@ n_input_channels: int,
                     reals_input += vars_meta
                 elif input_var in ["static_covariate"]:
                     if (
-                            self.static_covariates is None
+                        self.static_covariates is None
                     ):  # when training with fit_from_dataset
                         static_cols = pd.Index(
                             [i for i in range(static_covariates.shape[1])]
@@ -602,7 +628,7 @@ n_input_channels: int,
                         static_cols = self.static_covariates.columns
                     numeric_mask = ~static_cols.isin(self.categorical_embedding_sizes)
                     for idx, (static_var, col_name, is_numeric) in enumerate(
-                            zip(vars_meta, static_cols, numeric_mask)
+                        zip(vars_meta, static_cols, numeric_mask)
                     ):
                         static_input.append(static_var)
                         if is_numeric:
@@ -665,11 +691,11 @@ n_input_channels: int,
         )
 
     def _build_train_dataset(
-            self,
-            target: Sequence[TimeSeries],
-            past_covariates: Optional[Sequence[TimeSeries]],
-            future_covariates: Optional[Sequence[TimeSeries]],
-            max_samples_per_ts: Optional[int],
+        self,
+        target: Sequence[TimeSeries],
+        past_covariates: Optional[Sequence[TimeSeries]],
+        future_covariates: Optional[Sequence[TimeSeries]],
+        max_samples_per_ts: Optional[int],
     ) -> MixedCovariatesSequentialDataset:
 
         raise_if(
@@ -704,7 +730,3 @@ n_input_channels: int,
     @property
     def supports_static_covariates(self) -> bool:
         return False
-
-
-
-
