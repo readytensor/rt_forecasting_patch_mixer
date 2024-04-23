@@ -186,6 +186,7 @@ class Forecaster:
             self.pl_trainer_kwargs["accelerator"] = "gpu"
             print("GPU training is available.")
         else:
+            self.pl_trainer_kwargs["accelerator"] = "cpu"
             print("GPU training not available.")
 
         self.n_input_channels = len(self.data_schema.past_covariates) + 1

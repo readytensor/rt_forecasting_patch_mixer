@@ -179,6 +179,9 @@ class Backbone(nn.Module):
             z = self.padding_patch_layer(
                 x.permute(0, 2, 1)
             )  # B, L, D -> B, D, L -> B, D, L
+        if z.shape[-1] < self.patch_len:
+            z = F.pad(z, (0, self.patch_len - z.shape[-1]), "constant", 0)
+
         z = z.unfold(dimension=-1, size=self.patch_len, step=self.stride)  # B, D, L, P
         z = z.reshape(B * D, L, P, 1).squeeze(-1)
         z = self.embed(z)  # B * D, L, P -> # B * D, L, d
