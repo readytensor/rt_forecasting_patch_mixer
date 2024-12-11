@@ -6,7 +6,9 @@
   "batch_size": 16,
   "force_reset": true,
   "save_checkpoints": false,
-  "optimizer_kwargs": { "lr": 1e-3 },
+  "optimizer_kwargs": {
+    "lr": 0.001
+  },
   "use_exogenous": true,
   "random_state": 0,
   "use_past_covariates": true,
